@@ -9,7 +9,12 @@ from .._backends.auto import AutoBackend
 from .._backends.base import SOCKET_OPTION, AsyncNetworkBackend
 from .._exceptions import ConnectionNotAvailable, UnsupportedProtocol
 from .._models import Origin, Proxy, Request, Response
-from .._synchronization import AsyncEvent, AsyncShieldCancellation, AsyncThreadLock
+from .._synchronization import (
+    AsyncEvent,
+    AsyncLock,
+    AsyncShieldCancellation,
+    AsyncThreadLock,
+)
 from .connection import AsyncHTTPConnection
 from .interfaces import AsyncConnectionInterface, AsyncRequestInterface
 
@@ -397,6 +402,7 @@ class PoolByteStream:
         self._pool_request = pool_request
         self._pool = pool
         self._closed = False
+        self._close_lock = AsyncLock()
 
     async def __aiter__(self) -> typing.AsyncIterator[bytes]:
         try:
@@ -407,14 +413,15 @@ class PoolByteStream:
             raise exc from None
 
     async def aclose(self) -> None:
-        if not self._closed:
-            self._closed = True
-            with AsyncShieldCancellation():
-                if hasattr(self._stream, "aclose"):
-                    await self._stream.aclose()
+        with AsyncShieldCancellation():
+            async with self._close_lock:
+                if not self._closed:
+                    if hasattr(self._stream, "aclose"):
+                        await self._stream.aclose()
 
-            with self._pool._optional_thread_lock:
-                self._pool._requests.remove(self._pool_request)
-                closing = self._pool._assign_requests_to_connections()
+                    with self._pool._optional_thread_lock:
+                        self._pool._requests.remove(self._pool_request)
+                        closing = self._pool._assign_requests_to_connections()
+                    self._closed = True
 
-            await self._pool._close_connections(closing)
+                    await self._pool._close_connections(closing)
