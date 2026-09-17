@@ -9,7 +9,12 @@ from .._backends.sync import SyncBackend
 from .._backends.base import SOCKET_OPTION, NetworkBackend
 from .._exceptions import ConnectionNotAvailable, UnsupportedProtocol
 from .._models import Origin, Proxy, Request, Response
-from .._synchronization import Event, ShieldCancellation, ThreadLock
+from .._synchronization import (
+    Event,
+    Lock,
+    ShieldCancellation,
+    ThreadLock,
+)
 from .connection import HTTPConnection
 from .interfaces import ConnectionInterface, RequestInterface
 
@@ -397,6 +402,7 @@ class PoolByteStream:
         self._pool_request = pool_request
         self._pool = pool
         self._closed = False
+        self._close_lock = Lock()
 
     def __iter__(self) -> typing.Iterator[bytes]:
         try:
@@ -407,14 +413,15 @@ class PoolByteStream:
             raise exc from None
 
     def close(self) -> None:
-        if not self._closed:
-            self._closed = True
-            with ShieldCancellation():
-                if hasattr(self._stream, "close"):
-                    self._stream.close()
+        with ShieldCancellation():
+            with self._close_lock:
+                if not self._closed:
+                    if hasattr(self._stream, "close"):
+                        self._stream.close()
 
-            with self._pool._optional_thread_lock:
-                self._pool._requests.remove(self._pool_request)
-                closing = self._pool._assign_requests_to_connections()
+                    with self._pool._optional_thread_lock:
+                        self._pool._requests.remove(self._pool_request)
+                        closing = self._pool._assign_requests_to_connections()
+                    self._closed = True
 
-            self._pool._close_connections(closing)
+                    self._pool._close_connections(closing)
